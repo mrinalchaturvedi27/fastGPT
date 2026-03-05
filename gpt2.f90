@@ -84,6 +84,12 @@ real(sp) :: y(size(b,1),size(x,2))
 integer :: i
 !y = matmul(w, x) + spread(b, 2, size(x,2))
 !y = matmul(w, x)
+! FLOPs: 2 * size(w,1) * size(w,2) * size(x,2)
+! 124M hotspots (per token, per layer, n_seq_x=1):
+!   attn QKV:    w=(2304,768),  x=(768,1)  -> 2*2304*768   = 3,538,944
+!   attn proj:   w=(768,768),   x=(768,1)  -> 2*768*768    =   884,736 (+ per-head attention below)
+!   mlp fc:      w=(3072,768),  x=(768,1)  -> 2*3072*768   = 4,718,592
+!   mlp proj:    w=(768,3072),  x=(3072,1) -> 2*768*3072   = 4,718,592
 call matmul_2d(w, x, y)
 do i = 1, size(y,2)
     y(:,i) = y(:,i) + b(:)
@@ -103,9 +109,11 @@ integer, intent(in) :: n_embd_head, n_seq, n_seq_x
 real(sp), intent(in) :: q(n_embd_head,n_seq_x), k(n_embd_head,n_seq), v(n_embd_head,n_seq), mask(n_seq,n_seq_x)
 real(sp) :: y(n_embd_head,n_seq_x)
 real(sp) :: tmp(n_seq,n_seq_x)
-!tmp = matmul(transpose(k), q)
-!call matmul_2d(transpose(k), q, tmp)
+! FLOPs (per head, per token, 124M: n_embd_head=64, n_seq=T):
+!   QK^T score: 2 * n_embd_head * n_seq * n_seq_x = 2*64*T*T
+!   score * V:  2 * n_embd_head * n_seq * n_seq_x = 2*64*T*T
 call matmul_2d_t(k, q, tmp)
+! FLOPs: 2 * n_embd_head * n_seq * n_seq_x  (score * V matmul)
 call matmul_2d(v, softmax(tmp / sqrt(real(n_embd_head,sp)) + mask), y)
 end function
 
@@ -236,6 +244,7 @@ do i = 1, n_layer
 end do
 x = layer_norm(x, lnf_g, lnf_b, 1e-5)
 !y = matmul(transpose(wte), x)
+! FLOPs: 2 * n_vocab * n_embd * n_seq_x (124M: 2*50257*768 ≈ 77M per token)
 call matmul_2d_t(wte, x, y)
 end function
 

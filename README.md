@@ -202,6 +202,57 @@ You can choose which BLAS implementation to use for `matmul` using:
 * `-DFASTGPT_BLAS=OpenBLAS`: Use OpenBLAS
 * `-DFASTGPT_BLAS=Accelerate`: Use the macOS Accelerate Framework
 * `-DFASTGPT_BLAS=Fortran`: Use the default Fortran's intrinsic `matmul`
+* `-DFASTGPT_BLAS=CUDA`: Use NVIDIA cuBLAS (requires CUDA Toolkit ≥ 11)
+
+## Architecture
+
+### File dependency map
+
+```
+main.f90 / chat.f90 / app/gpt2.f90 / app/chatgpt2.f90
+    └── driver.f90         (load_model, gpt2_driver*, chat)
+            ├── gpt2.f90   (transformer_block, mha, attention, linear, ffn, gelu, softmax, layer_norm)
+            │       └── linalg  module  ←── backend selected at compile time:
+            │               ├── linalg_f.f90          (pure Fortran intrinsic matmul)
+            │               ├── linalg_c.f90           (Fortran→C glue: acc_sgemm / acc_sgemm_t)
+            │               │       ├── linalg_openblas.c    (cblas_sgemm via OpenBLAS)
+            │               │       ├── linalg_accelerate.c  (cblas_sgemm via Apple Accelerate)
+            │               │       └── linalg_cublas.c      (cublasSgemm via NVIDIA cuBLAS) [stub]
+            │               └── (future) linalg_openacc.f90  (do concurrent / OpenACC directives)
+            ├── tokenizer.f90  (encode / decode / BPE)
+            └── omp.f90 / omp_dummy.f90   (wall-clock timer; real or stub)
+```
+
+### linalg abstraction interface
+
+Any new backend (GPU, OpenACC, …) must expose exactly these two C-callable
+entry-points so that `linalg_c.f90` works without modification:
+
+```c
+/* C = A[m,k] * B[k,n]          (no transpose) */
+void acc_sgemm  (int m, int n, int k, float *A, float *B, float *C);
+
+/* C = A^T[k,m] * B[k,n]        (transpose first operand) */
+void acc_sgemm_t(int m, int n, int k, float *A, float *B, float *C);
+```
+
+All arrays are column-major (Fortran order), single precision (`real32`).
+
+### Transformer hotspots in gpt2.f90 (124M model: n_embd=768, n_layer=12, n_head=12)
+
+Every generated token triggers these GEMM calls (n_seq_x = 1 with KV-cache):
+
+| Operation | Call site | Matrix dims (m×k × k×n) | GFLOPs/token/layer |
+|-----------|-----------|--------------------------|-------------------|
+| Attention QKV projection | `linear` → `matmul_2d` | 2304×768 × 768×1 | 0.0035 |
+| Attention out projection | `linear` → `matmul_2d` | 768×768 × 768×1 | 0.0009 |
+| MLP fc (expand) | `linear` → `matmul_2d` | 3072×768 × 768×1 | 0.0047 |
+| MLP proj (contract) | `linear` → `matmul_2d` | 768×3072 × 3072×1 | 0.0047 |
+| Logit projection (once) | `matmul_2d_t` | 768×50257 × 768×1 | 0.0773 |
+
+All "per layer" values multiply by 12 layers → total per-layer GFLOPs/token ≈ 0.0138×12 = **0.166**.
+The logit projection runs once outside the loop (not multiplied by 12 layers) and contributes **0.077 GFLOPs**
+on its own — roughly 32% of the total, making it the dominant single bottleneck in the KV-cache decode path.
 
 ## Benchmarks
 
@@ -210,7 +261,6 @@ On Apple M1 Max, inference of the above input file (20 tokens):
                                     1 core  2 cores  4 cores  8 cores
 
     fastGPT (Accelerate, fast_tanh) 0.288s
-
     fastGPT (Accelerate)            0.299s
     PyTorch (Accelerate)            0.346s
 
@@ -231,6 +281,18 @@ Total run (includes loading the model and Python imports):
     picoGPT (8 cores):               3.445s
     PyTorch (OpenBLAS, 4 cores):     4.867s
 
+### Tokens per second (KV-cache enabled, 124M model, Apple M1 Max)
+
+| Backend | Cores | Inference time (20 tok) | Tokens/sec |
+|---------|-------|------------------------|------------|
+| Accelerate + fast_tanh | 1 | 0.288 s | **69.4** |
+| Accelerate | 1 | 0.299 s | 66.9 |
+| OpenBLAS | 1 | 0.837 s | 23.9 |
+| OpenBLAS | 4 | 0.341 s | 58.7 |
+| OpenBLAS | 8 | 0.339 s | 59.0 |
+
+These figures are the **CPU baseline** for any GPU acceleration work.
+
 ## TODO
 
 * [ ] Parallelization:
@@ -238,6 +300,9 @@ Total run (includes loading the model and Python imports):
   * [ ] MPI: https://github.com/certik/fastGPT/issues/5
 * [ ] Other sampling methods: https://github.com/certik/fastGPT/issues/8
 * [ ] Batching: https://github.com/certik/fastGPT/issues/7
+* [ ] GPU acceleration:
+  * [ ] cuBLAS backend (`linalg_cublas.c` stub ready — needs device buffer pool + benchmark)
+  * [ ] OpenACC / `do concurrent` Fortran-native GPU offload
 * [x] Improve the UI:
   * [x] Implement the input tokenizer in Fortran: https://github.com/certik/fastGPT/issues/1
   * [x] Show the words as they are generated: https://github.com/certik/fastGPT/issues/6
