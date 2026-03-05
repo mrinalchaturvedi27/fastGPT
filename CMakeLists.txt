@@ -25,8 +25,8 @@ else()
 endif()
 set(FASTGPT_BLAS ${DEFAULT_FASTGPT_BLAS}
     CACHE STRING "The BLAS library that fastGPT should use")
-if (NOT FASTGPT_BLAS MATCHES "Accelerate|OpenBLAS|Fortran")
-    message(FATAL_ERROR "FASTGPT_BLAS must be one of: OpenBLAS, Accelerate, Fortran (current value: '${FASTGPT_BLAS}')")
+if (NOT FASTGPT_BLAS MATCHES "Accelerate|OpenBLAS|Fortran|CUDA")
+    message(FATAL_ERROR "FASTGPT_BLAS must be one of: OpenBLAS, Accelerate, Fortran, CUDA (current value: '${FASTGPT_BLAS}')")
 endif ()
 if (FASTGPT_BLAS STREQUAL "Accelerate")
     find_package(OMP)
@@ -39,6 +39,9 @@ elseif (FASTGPT_BLAS STREQUAL "OpenBLAS")
     if(NOT OMP_FOUND)
         find_package(OpenMP REQUIRED COMPONENTS Fortran)
     endif()
+elseif (FASTGPT_BLAS STREQUAL "CUDA")
+    enable_language(CUDA)
+    find_package(CUDAToolkit REQUIRED)
 else()
     # pass
 endif()
@@ -62,6 +65,12 @@ elseif (FASTGPT_BLAS STREQUAL "OpenBLAS")
         linalg_c.f90
         omp.f90
     )
+elseif (FASTGPT_BLAS STREQUAL "CUDA")
+    list(APPEND SRC
+        linalg_cublas.c
+        linalg_c.f90
+        omp_dummy.f90
+    )
 else()
     list(APPEND SRC
         linalg_f.f90
@@ -75,6 +84,9 @@ if (FASTGPT_BLAS STREQUAL "Accelerate")
 elseif (FASTGPT_BLAS STREQUAL "OpenBLAS")
     target_link_libraries(fastgpt p::openblas
         "$<IF:$<BOOL:${OMP_FOUND}>,p::omp,OpenMP::OpenMP_Fortran>")
+elseif (FASTGPT_BLAS STREQUAL "CUDA")
+    target_link_libraries(fastgpt CUDA::cublas)
+    set_source_files_properties(linalg_cublas.c PROPERTIES LANGUAGE CUDA)
 endif()
 
 add_executable(gpt2 main.f90)
@@ -112,3 +124,7 @@ else ()
 endif ()
 message("Installation prefix: ${CMAKE_INSTALL_PREFIX}")
 message("FASTGPT_BLAS: ${FASTGPT_BLAS}")
+if (FASTGPT_BLAS STREQUAL "CUDA")
+    message("CUDA compiler: ${CMAKE_CUDA_COMPILER}")
+    message("CUDA Toolkit version: ${CUDAToolkit_VERSION}")
+endif()

@@ -1,1 +1,31 @@
 name = "fastGPT"
+version = "0.1.0"
+license = "MIT"
+
+[library]
+source-dir = "src"
+
+[[executable]]
+name = "gpt2"
+source-dir = "app"
+main = "gpt2.f90"
+
+[[executable]]
+name = "chatgpt2"
+source-dir = "app"
+main = "chatgpt2.f90"
+
+[[test]]
+name = "test_basic_input"
+source-dir = "tests"
+main = "test_basic_input.f90"
+
+[[test]]
+name = "test_more_inputs"
+source-dir = "tests"
+main = "test_more_inputs.f90"
+
+[[test]]
+name = "test_chat"
+source-dir = "tests"
+main = "test_chat.f90"
